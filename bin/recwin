@@ -1,0 +1,181 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+##:
+#h: Usage: $0 ...
+#h:
+#h: Record an specific window in the screen.
+#h:
+#h:     -D      : Print output directory.
+#h:     -O      : Print next output file.
+#h:     -t TEXT : Open dialog script.
+#h:     -o FILE : Save video there (webm).
+. hmain
+. xfilter
+. hmenu
+recwin() {
+    local OPTIND optopt= opt_D= opt_O= opt_t=
+    local window= audio= ofile= tname= tlog= tfile= pid= op= status= ign=
+    ## Parse command line arguments.
+    while getopts "DOt:o:" optopt; do # OPTARG
+        case $optopt in
+            D)  opt_D=y;;
+            O)  opt_O=y;;
+            t)  opt_t="${OPTARG}";;
+            o)  ofile="${OPTARG}";;
+            \?) return 1;;
+        esac
+    done
+    shift $(( $OPTIND - 1 ))
+    
+    ## Calculate next output file.
+    if test -n "${opt_D}"; then
+        printf '%s\n' "${RECWIN_DIRECTORY}"
+        return 0
+    fi
+    if test ! -n "${ofile}"; then
+        ofile="`seq -f "${RECWIN_DIRECTORY}/%03g.webm" 1 100 | xfilter test ! -e | head -n 1`"
+        test -n "${ofile}"
+    fi
+    if test -n "${opt_O}"; then
+        printf '%s\n' "${ofile}"
+        return 0
+    fi    
+    ## Get window.
+    if test ! -n "${window}"; then
+        if test -n "${opt_t}"; then
+            clear
+            sed -n 's|P: *||p' "${opt_t}"
+            echo "[Type enter when ready]"
+            read ign
+        fi
+        echo "[Select the screen area]"
+        window="`slop -D -f '-video_size %wx%h -i +%x,%y' 2>/dev/null`"
+        test -n "${window}"
+    fi
+    ## Get audio.
+    if test ! -n "${audio}"; then
+        audio="-f ${RECWIN_AUDIO_F} -ac 2 -i ${RECWIN_AUDIO_I}"
+    fi
+    ## Start recording.
+    tname="`mktemp -u`" tnum="1" status="n"
+    mkdir -p "${tname}"
+    hlog info "Output to: ${tname}/"
+    for tnum in `seq -f %02g 1 100`; do
+        if test -n "${opt_t}"; then
+            clear
+            case "${status}.${op}" in
+                r.start)
+                    echo "[!!!!!! NOW !!!!!]"
+                    ;;
+                n.)
+                    echo "[Read carefully and type <start>]"
+            esac
+            sed '/^P:/d' "${opt_t}"
+        fi
+        case "${status}" in
+            n) op="`slmenu -p "${SCRNAME} [${status}][${tnum}]" <<-EOF
+		start
+		EOF
+		`"
+               ;;
+            s) op="`slmenu -p "${SCRNAME} [${status}][${tnum}]" <<-EOF
+		resume
+		abort
+		save
+		EOF
+		`"
+               ;;
+            r) echo "[${tlog}]"
+               op="`slmenu -p "${SCRNAME} [${status}][${tnum}]" <<-EOF
+		abort
+		pause
+		save
+		EOF
+		`"
+               ;;
+        esac
+        case "${status}.${op}" in
+            s.resume|n.start)
+                clear
+                tlog="${tname}/${tnum}.log"
+                tfile="${tname}/${tnum}.webm"
+                ffmpeg             \
+                    -f x11grab     \
+                    -framerate 25  \
+                    ${window}      \
+                    ${audio}       \
+                    -c:v libvpx    \
+                    -c:a libvorbis \
+                    "${tfile}" > "${tlog}" 2>&1 &
+                pid="$!"
+                status="r"
+                sleep 1
+                ;;
+            s.abort)
+                break
+                ;;
+            s.save)
+                status="f"
+                break
+                ;;
+            r.abort)
+                kill -s INT "${pid}"
+                wait
+                break
+                ;;
+            r.pause)
+                kill -s INT "${pid}"
+                wait
+                status="s"
+                ;;
+            r.save)
+                kill -s INT "${pid}"
+                wait
+                status="f"
+                break
+                ;;
+        esac        
+    done
+    ## Save.
+    if test @"${status}" = @"f"; then
+        echo "Saving to ${ofile} ..."
+        find "${tname}" \
+             -iregex '.*\.webm' \
+             -exec printf "file '%s'\\n" '{}' ';' \
+             > "${tname}/files"
+        ffmpeg -loglevel error     \
+               -f concat           \
+               -safe 0             \
+               -i "${tname}/files" \
+               -c copy             \
+               "${ofile}"
+    fi
+}
+## -----------------------------------------------------------------------------
+RECWIN_DIRECTORY="${RECWIN_DIRECTORY:-/tmp/recwin}"
+RECWIN_AUDIO_F="${RECWIN_AUDIO_F:-pulse}"
+RECWIN_AUDIO_I="${RECWIN_AUDIO_I:-default}"
+hmain -f "recwin" -r "ffmpeg" -r "slop" -r "slmenu" -e recwin "$@"
